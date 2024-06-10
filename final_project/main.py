@@ -3,31 +3,40 @@ from moviepy.editor import VideoFileClip
 import pyttsx3
 import subprocess
 import speech_recognition as sr
+from pydub import AudioSegment
+from pydub.utils import make_chunks
 from tkinter import Tk, filedialog
 import logging
 from translations import translation_dict
+from gtts import gTTS
+import tempfile
 
 # Setup logging
+# created by whitedevil999123
 logging.basicConfig(level=logging.INFO)
 
-def dummy_translate_to_hindi(text):
+def translate_to_hinglish(text):
     """
-    Translate English text to Hindi using a predefined dictionary.
+    Translate text to Hinglish (a mixture of Hindi and English).
+    For simplicity, this function will translate every other word into Hindi.
 
     Parameters:
     text (str): The input text in English.
 
     Returns:
-    str: The translated text in Hindi.
+    str: The translated text in Hinglish.
     """
-    def translate_word(word):
-        # Look up the word in the translation dictionary
-        return translation_dict.get(word.lower(), word)
-
-    translated_words = [translate_word(word) for word in text.split()]
+    translated_words = []
+    words = text.split()
+    for i, word in enumerate(words):
+        if i % 2 == 0:
+            # Preserve English words
+            translated_words.append(word)
+        else:
+            # Translate Hindi words
+            translated_words.append(translation_dict.get(word.lower(), word))
     return ' '.join(translated_words)
 
-# Function to extract audio from video
 def extract_audio(video_path, audio_path):
     logging.info("Extracting audio from video...")
     try:
@@ -37,39 +46,49 @@ def extract_audio(video_path, audio_path):
     except Exception as e:
         logging.error("Error extracting audio: %s", e)
 
-# Function to transcribe audio using Sphinx
-def transcribe_audio(audio_path):
-    logging.info("Transcribing audio...")
-    try:
-        recognizer = sr.Recognizer()
-        audio_file = sr.AudioFile(audio_path)
+def transcribe_audio_chunks(audio_path, chunk_length_ms=5000):
+    logging.info("Transcribing audio in chunks...")
+    recognizer = sr.Recognizer()
+    audio = AudioSegment.from_file(audio_path)
+    chunks = make_chunks(audio, chunk_length_ms)
+    transcripts = []
 
-        with audio_file as source:
+    for i, chunk in enumerate(chunks):
+        chunk_filename = f"chunk{i}.wav"
+        chunk.export(chunk_filename, format="wav")
+        with sr.AudioFile(chunk_filename) as source:
             audio_data = recognizer.record(source)
+            try:
+                transcript = recognizer.recognize_sphinx(audio_data)
+                # Calculate start and end times
+                start_time = i * chunk_length_ms / 1000
+                end_time = start_time + len(chunk) / 1000
+                transcripts.append((start_time, end_time, transcript))
+            except sr.UnknownValueError:
+                transcripts.append((0, 0, ""))
+            except sr.RequestError as e:
+                logging.error("Sphinx error: %s", e)
+                transcripts.append((0, 0, ""))
+        os.remove(chunk_filename)
+    return transcripts
 
-        transcript = recognizer.recognize_sphinx(audio_data)
-        logging.info("Transcript: %s", transcript)
-        return transcript
-    except Exception as e:
-        logging.error("Error transcribing audio: %s", e)
-        return "Transcription failed"
+def text_to_speech_with_timing(transcripts, output_audio_path):
+    logging.info("Converting translated text to speech with timing...")
+    combined = AudioSegment.silent(duration=0)
 
-# Function to convert text to speech
-def text_to_speech(text, output_path):
-    logging.info("Converting text to speech...")
-    engine = pyttsx3.init()
-    try:
-        engine.setProperty('rate', 150)
-        engine.setProperty('volume', 0.9)
-        engine.save_to_file(text, output_path)
-        engine.runAndWait()
-        logging.info("Text converted to speech successfully. Output file: %s", output_path)
-        return True
-    except Exception as e:
-        logging.error("Error converting text to speech: %s", e)
-        return False
+    for start, end, text in transcripts:
+        translated_text = translate_to_hinglish(text)
+        temp_audio_path = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False).name
+        if translated_text.isascii():
+            tts = gTTS(translated_text, lang='en')  # English
+        else:
+            tts = gTTS(translated_text, lang='hi')  # Hindi
+        tts.save(temp_audio_path)
+        audio_segment = AudioSegment.from_file(temp_audio_path, format="mp3")
+        combined += audio_segment
 
-# Function to replace original audio with translated audio in video
+    combined.export(output_audio_path, format="wav")
+
 def replace_audio_in_video(video_path, new_audio_path, output_video_path):
     logging.info("Replacing audio in video...")
     command = [
@@ -80,19 +99,16 @@ def replace_audio_in_video(video_path, new_audio_path, output_video_path):
     logging.info("FFmpeg output: %s", result.stdout)
     logging.error("FFmpeg error: %s", result.stderr)
 
-# Function to select a video file
 def select_video_file():
     Tk().withdraw()  # Hide the root Tk window
     video_path = filedialog.askopenfilename(title="Select Video File", filetypes=[("Video Files", "*.mp4 *.avi *.mov")])
     return video_path
 
-# Function to clean up temporary files
 def cleanup_files(*files):
     for file in files:
         if os.path.exists(file):
             os.remove(file)
 
-# Main function to process video
 def process_video(video_path):
     if not video_path or not os.path.exists(video_path):
         logging.error("Invalid video file.")
@@ -103,28 +119,15 @@ def process_video(video_path):
     new_video_path = "translated_video.mp4"
 
     try:
-        # Extract audio from video
         extract_audio(video_path, audio_path)
         if not os.path.exists(audio_path):
             logging.error("Audio extraction failed.")
             return
 
-        # Transcribe audio to text
-        transcript = transcribe_audio(audio_path)
-        if "Transcription failed" in transcript:
-            logging.error("Transcription failed.")
-            return
+        transcripts = transcribe_audio_chunks(audio_path)
+        text_to_speech_with_timing(transcripts, tts_audio_path)
 
-        # Translate text to Hindi (using dummy translation function)
-        translated_text = dummy_translate_to_hindi(transcript)
-
-        # Convert translated text to speech
-        if text_to_speech(translated_text, tts_audio_path):
-            if not os.path.exists(tts_audio_path):
-                logging.error("Text-to-speech conversion failed.")
-                return
-
-            # Replace the original audio with translated audio
+        if os.path.exists(tts_audio_path):
             replace_audio_in_video(video_path, tts_audio_path, new_video_path)
             logging.info("Video processing complete. Translated video saved as %s", new_video_path)
         else:
